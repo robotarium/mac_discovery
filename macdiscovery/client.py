@@ -13,16 +13,29 @@ def main():
     logger = log.get_logger()
 
     parser = argparse.ArgumentParser()
+    parser.add_argument('ip', type=str, help='IP on which to bind UDP socket')
     parser.add_argument('recv_port', type=int, help='Port on which UDP server listens.')
     parser.add_argument('send_port', type=int, help='Port on which UDP message are sent')
     parser.add_argument('quiesce', type=int, help='How many intervals to continue when no new MACs are received.')
+    parser.add_argument('--mac_list', type=str, help='Previous MAC list')
     parser.add_argument('-i', type=int, default=1, help='Interval at which to send UDP messages')
 
     args = parser.parse_args()
+    ip = args.ip
     recv_port = args.recv_port
     send_port = args.send_port
     quiesce = args.quiesce
     interval = args.i
+
+    previous_macs = {}
+
+    if(args.mac_list):
+        try:
+            f = open(args.mac_list, 'r')
+            previous_macs = json.load(f)
+        except Exception as e:
+            logger.error('Could not open supplied MAC list file ({}).'.format(args.mac_list))
+            logger.error(e)
 
     # Create a UDP socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -33,8 +46,8 @@ def main():
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
-    logger.info('Binding UDP socket to port {}.'.format(recv_port))
-    sock.bind(('0.0.0.0', recv_port))
+    logger.info('Binding UDP socket to address {}:{}.'.format(ip, recv_port))
+    sock.bind((ip, recv_port))
 
     message = json.dumps({"method": "get", "link": "mac", "port": recv_port}).encode(encoding='UTF-8')
     received = []
@@ -47,7 +60,7 @@ def main():
         sock.sendto(message, ('<broadcast>', send_port))
         data, address = sock.recvfrom(MAX_RECEIVE_BYTES)
 
-        logger.info('Received {} from {}'.format(data, address))
+        logger.debug('Received {} from {}'.format(data, address))
         if not data:
             continue
 
@@ -71,7 +84,6 @@ def main():
 
         # If we didn't add anything new
         if(prev_mac_count >= len(macs)):
-            logger.info('q')
             q += 1
         else:
             q = 0
@@ -98,6 +110,23 @@ def main():
             continue
 
     logger.info('Received MACs: {}'.format(macs))
+
+    old_macs = set(previous_macs.keys())
+    new_macs = macs.difference(old_macs)
+
+    macs = list(macs)
+    # print(previous_macs)
+    ids = set(range(200))
+    ids = ids.difference(old_macs)
+    ids = list(ids)
+    ids = ids[:len(new_macs)]
+
+    # print(old_macs)
+    # print(new_macs)
+
+    mapping = dict(zip(new_macs, ids))
+    mapping.update(previous_macs)
+    logger.info(mapping)
     sock.close()
 
 
