@@ -1,44 +1,31 @@
-import asyncio
-import udpprotocol as udp
 import socket
 import struct
 import argparse
 import vizier.log as log
 import json
-import queue
 import time
-import concurrent.futures
 
-global logger
-logger = log.get_logger()
-
-global message_q
-message_q = queue.Queue()
-
-global message
-
-
-def handler(transport, message, address):
-    print(message)
-    message_q.put((message, address))
+MAX_RECEIVE_BYTES = 4096
 
 
 def main():
 
+    logger = log.get_logger()
+
     parser = argparse.ArgumentParser()
-    parser.add_argument('port', type=int, help='Port on which UDP server listens.')
-    parser.add_argument('duration', type=int, help='How long to listen.')
+    parser.add_argument('recv_port', type=int, help='Port on which UDP server listens.')
+    parser.add_argument('send_port', type=int, help='Port on which UDP message are sent')
+    parser.add_argument('quiesce', type=int, help='How many intervals to continue when no new MACs are received.')
+    parser.add_argument('-i', type=int, default=1, help='Interval at which to send UDP messages')
 
     args = parser.parse_args()
-    port = args.port
-    duration = args.duration
+    recv_port = args.recv_port
+    send_port = args.send_port
+    quiesce = args.quiesce
+    interval = args.i
 
-    loop = asyncio.get_event_loop()
-
-    listen = loop.create_datagram_endpoint(lambda: udp.UdpProtocol(handler), local_addr=('0.0.0.0', port), family=socket.AF_INET)
-    transport, protocol = loop.run_until_complete(listen)
-
-    sock = transport.get_extra_info('socket')
+    # Create a UDP socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     group = socket.inet_aton('239.255.255.250')
     mreq = struct.pack('4sL', group, socket.INADDR_ANY)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
@@ -46,35 +33,72 @@ def main():
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
-    executor = concurrent.futures.ThreadPoolExecutor()
-    future = executor.submit(loop.run_forever)
+    logger.info('Binding UDP socket to port {}.'.format(recv_port))
+    sock.bind(('0.0.0.0', recv_port))
 
-    message = json.dumps({"method": "get", "link": "mac", "port": port}).encode(encoding='UTF-8')
+    message = json.dumps({"method": "get", "link": "mac", "port": recv_port}).encode(encoding='UTF-8')
+    received = []
+    macs = set()
+    prev_mac_count = len(macs)
 
-    start = time.time()
-    while True:
-        logger.info('Sending message')
-        transport.sendto(message, ('<broadcast>', 5001))
+    q = 0
+    while q < quiesce:
 
-        if(time.time() - start > duration):
-            break
+        sock.sendto(message, ('<broadcast>', send_port))
+        data, address = sock.recvfrom(MAX_RECEIVE_BYTES)
 
-        time.sleep(1)
+        logger.info('Received {} from {}'.format(data, address))
+        if not data:
+            continue
 
-    received = {}
-    while True:
         try:
-            m = message_q.get_nowait()
-            print(m)
-        except Exception:
-            break
+            js = json.loads(data)
+        except Exception as e:
+            log.warning(e)
+            logger.warning('Could not JSON-decode message ({}).'.format(data))
 
-    transport.close()
-    loop.stop()
-    print('here')
-    executor.shutdown(wait=False)
-    print('here')
-    future.result()
+        if('body' in js):
+            if('mac' in js['body']):
+                mac = js['body']['mac']
+                macs.add(mac)
+                #macs.append(mac)
+            else:
+                logger.warning('Expected field "mac" in JSON message.')
+                continue
+        else:
+            logger.warning('Expected field "body" in JSON message.')
+            continue
+
+        # If we didn't add anything new
+        if(prev_mac_count >= len(macs)):
+            logger.info('q')
+            q += 1
+        else:
+            q = 0
+
+        prev_mac_count = len(macs)
+        time.sleep(interval)
+
+    for x in received:
+        try:
+            js = json.loads(x)
+        except Exception as e:
+            log.warning(e)
+            logger.warning('Could not JSON-decode message ({}).'.format(x))
+
+        if('body' in js):
+            if('mac' in js['body']):
+                mac = js['body']['mac']
+                macs.append(mac)
+            else:
+                logger.warning('Expected field "mac" in JSON message.')
+                continue
+        else:
+            logger.warning('Expected field "body" in JSON message.')
+            continue
+
+    logger.info('Received MACs: {}'.format(macs))
+    sock.close()
 
 
 if __name__ == '__main__':
